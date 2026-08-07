@@ -29,6 +29,8 @@
 #include "logger.h"
 #include "clock_service.h"
 #include "maneuver_tracker.h"      /* 通用机动跟踪器（header-only，替代掉头 5 层 gate） */
+#include "long_pid.h"              /* 纵向 PID + anti-windup 纯逻辑核（header-only，可单测） */
+#include "road_guard.h"            /* 速度死锁恢复 + ROAD_GUARD 强制回正纯逻辑核（header-only，可单测） */
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -780,73 +782,25 @@ protected:
             double throttle = 0, brake = 0, steer = 0;
             const char* mode = "NONE";
 
-            /* PID 纵向 — 倒车时镜像速度符号，让 PID 始终在正域工作。
-             * 倒车：target=-3.0, current=-1.0 → pid_target=3.0, pid_current=1.0
-             * → error=2.0 → output>0 → throttle=+ → 最后取反为负油门。 */
-            double pid_target = acc_target;
-            double pid_current = g.current_speed;
+            /* PID 纵向 — 纯逻辑核已抽到 long_pid.h（header-only，可单测）。
+             * 倒车镜像、积分限幅、输出映射、换挡刹停、anti-windup（含加速→减速
+             * 翻负清零 + 机动负积分对称清除）全部在 long_pid_step 内，逐行等价。
+             * 历史 bug（"遇慢车不减速油门全开撞前车" / "掉头返程卡死"）由
+             * tests/test_long_pid.cpp 确定性拦下，详见 docs/ARCHITECTURE_REVIEW.md。 */
             bool is_reverse = (g.gear == GEAR_REVERSE);
-            if (is_reverse) {
-                pid_target = -acc_target;
-                pid_current = -g.current_speed;
-            }
-            double pid_error = pid_target - pid_current;
-
-            g.integral += pid_error * 0.05;
-            if (g.integral > 500)  g.integral = 500;
-            if (g.integral < -200) g.integral = -200;
-
-            double derivative = (pid_error - g.prev_error) / 0.05;
-            double output = g.kp * pid_error + g.ki * g.integral + g.kd * derivative;
-
-            if (output > 0) {
-                throttle = output / 5000.0;
-                if (throttle > 1.0) throttle = 1.0;
-                brake = 0;
-                mode = (pid_error < 1.0) ? "HOLD" : (is_reverse ? "REV_ACCEL" : "ACCEL");
-            } else {
-                throttle = 0;
-                brake = (-output) / 8000.0;
-                if (brake > 1.0) brake = 1.0;
-                mode = is_reverse ? "REV_BRAKE" : "BRAKE";
-            }
-            /* 倒车：油门取反（flowsim physics 用负油门触发倒车） */
-            if (is_reverse) throttle = -throttle;
-
-            /* 机动换挡刹停：gear_pending = 带速想换挡（掉头 Phase 2→3 D→R
-             * 交界）。巡航 PID 是减速工况标定的，对 2.4m/s 只给 0.23 brake
-             * （decel≈1.2m/s²，需 1.9s/2.3m），车还没停就冲过倒车段、最近点
-             * 跳到 Phase 4 正向 → gear 翻回 D → 加速冲出路面（2026-08-03
-             * 实测 y=8.5）。换挡必须物理刹停，直接给全刹——这就是掉头
-             * 三把方向的"停"字。 */
-            if (g.maneuver_mode && g.gear_pending) {
-                throttle = 0.0;
-                brake = 1.0;
-                mode = "SHIFT_STOP";
-                g.integral = 0;  /* 全刹时清积分，防换挡后残余积分反向推车 */
-            }
-
-            /* Anti-windup：error 从正翻负时（加速→减速切换），积分饱和是追尾主因。
-             * 加速阶段积分可累积到 +500（I=50×+500=+25000），此时减速指令 P=800×(-8)=-6400，
-             * 总量 +18600 → 油门全开撞上去。
-             * 修复：error 翻负且 |error|>2 时直接清零正积分；正常饱和时慢速泄放。 */
-            if (pid_error < -2.0 && g.integral > 0) {
-                g.integral = 0;  /* 从加速切到减速，残余正积分是催命符，立刻清零 */
-            } else {
-                if (g.integral > 0 && throttle >= 1.0 && pid_error > 0)
-                    g.integral -= pid_error * 0.05;
-                if (g.integral > 0 && brake >= 1.0 && pid_error < 0)
-                    g.integral += pid_error * 0.05;
-            }
-            /* 2026-08-05 掉头卡死修复（负积分对称清除）：Phase 1 刹停到 0 时
-             * error<0 使积分转负，目标翻正（驻停/慢转 target>0）后负积分残留把车
-             * 钉在原地 —— 掉头返程实测 spd=0 target=0.5 brk=0.13 卡死 30s timeout。
-             * 机动模式下车近停且 target 为正时清负积分，让车能起步继续轨迹。 */
-            if (g.maneuver_mode && g.integral < 0 &&
-                pid_error > 0.2 && fabs(g.current_speed) < 1.0) {
-                g.integral = 0;
-            }
-            g.prev_error = pid_error;
+            longitudinal::LongPidParams pid_p;
+            pid_p.kp = g.kp;
+            pid_p.ki = g.ki;
+            pid_p.kd = g.kd;
+            longitudinal::LongPidState pid_st{ g.integral, g.prev_error };
+            longitudinal::LongPidOutput pid_out = longitudinal::long_pid_step(
+                pid_st, pid_p, acc_target, g.current_speed,
+                is_reverse, g.maneuver_mode, g.gear_pending);
+            g.integral   = pid_st.integral;
+            g.prev_error = pid_st.prev_error;
+            throttle = pid_out.throttle;
+            brake    = pid_out.brake;
+            mode     = pid_out.mode;
 
             /* ── LTV MPC 横向控制 ──
              * 机动模式（掉头/倒车）跳过：MPC 线性化假设小转角误差动力学，
@@ -1001,40 +955,41 @@ protected:
              * safety_control 层有 TTC 限幅。control 是纯轨迹跟随器，不做速度决策。
              * 原超速限幅用 cfg_cruise_speed 做阈值，但 control 不应有自己的巡航速度。 */
 
-            /* 全域速度死锁恢复 */
-            if (g.speed_zero_timer > SPEED_ZERO_RECOVER_S &&
-                y_from_target <= ROAD_GUARD_THRESHOLD_M &&
-                g.has_planning && g.target_speed > 1.0) {
-                throttle = 0.15;
-                brake    = 0.0;
-                mode     = "SPEED_ZERO_RECOVERY";
-                g.speed_zero_timer = 0.0;
-                LOG_WARN("control", ">>> SPEED_ZERO RECOVERY: throttle bump at y=%.2f (ego@(%.1f,%.1f)) tgt=%.1f",
-                         g.ego_y, g.ego_x, g.ego_y, g.target_speed);
-            }
+            /* 全域速度死锁恢复 + ROAD_GUARD 强制回正（抽核到 road_guard.h）。
+             * 两分支互斥（y≤阈值→死锁恢复；y>阈值→强制回正），三个历史 bug
+             * （卡死恢复独立于 y、返程 steer 符号用参考系投影、低速给油而非刹车）
+             * 由 road_guard_decide 内部实现；steer 限幅、计时器/prev_steer 应用留在此处。
+             * road_c 是道路中心 y（不含横向偏移），目标车道中心 = road_c + lane_d，
+             * y_from_target = |ego_y − 目标车道中心|。机动期（掉头横穿整条路）豁免 ROAD_GUARD，
+             * 否则抢走执行权导致掉头永不完成（2026-08-03 demo6 车被拽出路面到 y=-11）。 */
+            {
+                control::RoadGuardParams rgp;  /* 默认值 = 原内联字面量 */
+                control::RoadGuardIn rgi;
+                rgi.speed_zero_timer = g.speed_zero_timer;
+                rgi.y_from_target    = y_from_target;
+                rgi.has_planning     = (bool)g.has_planning;
+                rgi.target_speed     = g.target_speed;
+                rgi.current_speed    = g.current_speed;
+                rgi.lat_err_n        = lat_err_n;
+                rgi.maneuver_mode    = g.maneuver_mode;
+                rgi.steer_limit      = steer_limit_for_speed(fabs(g.current_speed), 2.4);
+                rgi.throttle_in      = throttle;
+                rgi.brake_in         = brake;
+                rgi.steer_in         = steer;
 
-            /* ROAD_GUARD：车辆偏离目标车道中心过远时强制回正。
-             * road_c 现在是道路中心 y（不含横向偏移），目标车道中心 = road_c + lane_d。
-             * 旧实现检查 |ego_y - road_c|，对 4 车道外车道（y=±5.25）永远触发。
-             * 机动期豁免：掉头本来就要横穿整条路，y_from_target 必然 >3m，
-             * 不豁免则 ROAD_GUARD 抢走执行权（钳 steer=0.16 + 乱设油门），
-             * 掉头永不完成（2026-08-03 demo6 实测车被拽出路面到 y=-11）。 */
-            if (y_from_target > ROAD_GUARD_THRESHOLD_M && !g.maneuver_mode) {
-                double steer_limit = steer_limit_for_speed(fabs(g.current_speed), 2.4);
-                /* 用参考系投影误差 lat_err_n：正误差=左打对前进/返程都成立。
-                 * 旧实现用世界系 lat_error，假设车头恒朝 +x，掉头返程时打反
-                 * → 车持续北漂出路面越漂越远（2026-08-03 demo11：y 23→33）。 */
-                steer = (lat_err_n > 0.0) ? steer_limit : -steer_limit;
-                if (fabs(g.current_speed) < 2.5) {
-                    throttle = 0.18;
-                    brake = 0.0;
-                    g.speed_zero_timer = 0.0;
-                } else {
-                    throttle = 0.0;
-                    if (brake < 0.65) brake = 0.65;
+                control::RoadGuardOut rgo = control::road_guard_decide(rgi, rgp);
+                throttle = rgo.throttle;
+                brake    = rgo.brake;
+                steer    = rgo.steer;
+                if (rgo.reset_speed_zero_timer) g.speed_zero_timer = 0.0;
+                if (rgo.update_prev_steer)      g.prev_steer = steer;
+                if (rgo.mode == control::RoadGuardMode::SPEED_ZERO_RECOVERY) {
+                    mode = "SPEED_ZERO_RECOVERY";
+                    LOG_WARN("control", ">>> SPEED_ZERO RECOVERY: throttle bump at y=%.2f (ego@(%.1f,%.1f)) tgt=%.1f",
+                             g.ego_y, g.ego_x, g.ego_y, g.target_speed);
+                } else if (rgo.mode == control::RoadGuardMode::ROAD_GUARD) {
+                    mode = "ROAD_GUARD";
                 }
-                g.prev_steer = steer;
-                mode = "ROAD_GUARD";
             }
 
             /* 转向灯 / 双闪指令 */

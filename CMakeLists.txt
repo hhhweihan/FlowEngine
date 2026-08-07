@@ -903,6 +903,56 @@ target_include_directories(test_maneuver_tracker PRIVATE ${GEN_DIR} modules/adas
 add_test(NAME maneuver_tracker_tests COMMAND test_maneuver_tracker)
 set_tests_properties(maneuver_tracker_tests PROPERTIES TIMEOUT 10)
 
+# ── 纵向 PID + anti-windup 纯逻辑核单元测试（header-only，无 transport/param 依赖）──
+# 把 control_node.cpp 的纵向控制核抽到 long_pid.h 后立的测试网，编码故障表两个
+# 历史 bug（加速→减速积分饱和撞车 / 掉头返程负积分卡死）为回归守卫。
+add_executable(test_long_pid tests/test_long_pid.cpp)
+target_include_directories(test_long_pid PRIVATE modules/adas_nodes)
+add_test(NAME long_pid_tests COMMAND test_long_pid)
+set_tests_properties(long_pid_tests PROPERTIES TIMEOUT 10)
+
+# 安全层近场几何纯逻辑核（Phase 0 立测试网）：掉头返程方向投影回归守卫。
+# 只依赖 safety_geometry.h（header-only，无框架依赖）。
+add_executable(test_safety_geometry tests/test_safety_geometry.cpp)
+target_link_libraries(test_safety_geometry m)
+target_include_directories(test_safety_geometry PRIVATE modules/adas_nodes)
+add_test(NAME safety_geometry_tests COMMAND test_safety_geometry)
+set_tests_properties(safety_geometry_tests PROPERTIES TIMEOUT 10)
+
+# 变道超车值得性判定纯逻辑核（Phase 0 立测试网）：worthwhile 反逻辑回归守卫。
+# 只依赖 overtake_decision.h（header-only，无框架依赖）。
+add_executable(test_overtake_decision tests/test_overtake_decision.cpp)
+target_link_libraries(test_overtake_decision m)
+target_include_directories(test_overtake_decision PRIVATE modules/adas_nodes)
+add_test(NAME overtake_decision_tests COMMAND test_overtake_decision)
+set_tests_properties(overtake_decision_tests PROPERTIES TIMEOUT 10)
+
+# 会车让行 + 窄路减速纯逻辑核（Phase 0 立测试网）：掉头返程幽灵刹车 / 会车过度保守回归守卫。
+# 只依赖 oncoming_yield.h（header-only，无框架依赖）。
+add_executable(test_oncoming_yield tests/test_oncoming_yield.cpp)
+target_link_libraries(test_oncoming_yield m)
+target_include_directories(test_oncoming_yield PRIVATE modules/adas_nodes)
+add_test(NAME oncoming_yield_tests COMMAND test_oncoming_yield)
+set_tests_properties(oncoming_yield_tests PROPERTIES TIMEOUT 10)
+
+# 速度死锁恢复 + ROAD_GUARD 强制回正纯逻辑核（Phase 0 立测试网）：车速降 0 卡死 /
+# 返程 steer 打反出路面 / 低速仍刹车互锁 三个历史 bug 的回归守卫。
+# 只依赖 road_guard.h（header-only，无框架依赖）。
+add_executable(test_road_guard tests/test_road_guard.cpp)
+target_link_libraries(test_road_guard m)
+target_include_directories(test_road_guard PRIVATE modules/adas_nodes)
+add_test(NAME road_guard_tests COMMAND test_road_guard)
+set_tests_properties(road_guard_tests PROPERTIES TIMEOUT 10)
+
+# 归位/变道目标车道前方红灯闸门纯逻辑核（Phase 0 立测试网）：超车/归位后立刻红灯前刹停
+# （无效变道）/ 掉头返程方向盲 两个历史 bug 的回归守卫。
+# 依赖 stop_light_gate.h（间接带入 include/road_geometry.h 共享纯 inline）。
+add_executable(test_stop_light_gate tests/test_stop_light_gate.cpp)
+target_link_libraries(test_stop_light_gate m)
+target_include_directories(test_stop_light_gate PRIVATE modules/adas_nodes include)
+add_test(NAME stop_light_gate_tests COMMAND test_stop_light_gate)
+set_tests_properties(stop_light_gate_tests PROPERTIES TIMEOUT 10)
+
 # ── EKF 融合 / EKF-SLAM 纯 C 单元测试 ──
 # 这两个测试文件此前存在却未进门禁：test_ekf_slam 只在 adas_nodes 子项目里有
 # add_executable 而无 add_test（且子项目不 enable_testing()、不被标准 ctest 覆盖）；

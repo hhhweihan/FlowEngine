@@ -10,7 +10,6 @@ FlowEngine 全部文档的统一入口。按「我想做什么」分组，找不
 | 文档 | 说明 |
 |------|------|
 | [QUICK_START.md](QUICK_START.md) | 30 分钟快速入门：构建、跑 demo、看仪表盘 |
-| [SIMULATION_GUIDE.md](SIMULATION_GUIDE.md) | 仿真测试指南 + 场景矩阵回归 |
 | [CODE_WIKI.md](CODE_WIKI.md) | 代码地图：核心模块 / 节点 / 关键函数逐一索引（找代码从这里开始） |
 | [API_QUICK_REFERENCE.md](API_QUICK_REFERENCE.md) | 统一 API 速查（cJSON / clock_service / param / node_pump） |
 
@@ -30,7 +29,6 @@ FlowEngine 全部文档的统一入口。按「我想做什么」分组，找不
 |------|------|
 | [ALGORITHM_STACK.md](ALGORITHM_STACK.md) | 算法栈总览（实际实现） |
 | [ALGORITHM_INTEGRATION.md](ALGORITHM_INTEGRATION.md) | 算法集成指南 |
-| [ALGORITHM_VERIFY_PATTERN.md](ALGORITHM_VERIFY_PATTERN.md) | 算法快速验证工作流（Python 仿真先行） |
 | [PLANNING_SPEED_UPGRADE_DESIGN.md](PLANNING_SPEED_UPGRADE_DESIGN.md) | 速度规划升级设计（ST 图 + DP/QP） |
 | [CALIBRATION_GUIDE.md](CALIBRATION_GUIDE.md) | 控制参数标定指南 |
 

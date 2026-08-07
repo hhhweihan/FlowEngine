@@ -34,6 +34,7 @@
 #include "logger.h"
 #include "clock_service.h"
 #include "degrade_ladder.h"
+#include "oncoming_yield.h"  /* 会车让行 + 窄路减速纯逻辑核（Phase 5 抽核，header-only 可单测；无框架依赖，须置于 HAVE_FRENET 分支外，让行判定本身不依赖 Frenet） */
 #include <cjson/cJSON.h>
 
 #ifdef HAVE_FRENET
@@ -1593,62 +1594,22 @@ protected:
              * 在 Frenet 规划前调整 command_speed,让规划器在约束下生成轨迹。
              * 会车: 对向有来车时降速让行; 窄路: 两侧间距不足时降速。 */
             if (g.has_vstate) {
-                int oncoming = 0;
-                double min_clearance_left  = 1e9;  /* 左侧最近障碍横向距离 */
-                double min_clearance_right = 1e9;  /* 右侧最近障碍横向距离 */
-                /* 会车横向判定上限：只在**同一条车道**才算迎头（2026-08-05 与
-                 * safety min_oncoming_ttc 对齐）。旧逻辑 2.0<|dy|≤1.5×路宽把
-                 * 相邻对向车道（3.5m 外）也当迎头 → 掉头返程每次接近对向车
-                 * 都 0.4× 让行 = 幽灵刹车（用户实测）。同车道头对头才是真风险，
-                 * 分隔车道不是。 */
-                const double oncoming_lat_max = (g.lane_width > 1.0 ? g.lane_width : 3.5) * 0.65;
-                /* 方向感知（2026-08-04 返程修复 + 2026-08-05 移除世界 dx 预筛）：
-                 * 旧世界 dx 窗口 (-10,80] 在返程朝 -x 时前方车 dx<−10 被跳过
-                 * （方向盲，该侧无对向保护）。沿车头方向投影后前进/返程统一：
-                 * 同向车沿向速度恒为正（远离）、对向车为负（接近）。 */
-                const double fwd_x = std::cos(g.ego_heading);
-                const double fwd_y = std::sin(g.ego_heading);
-                for (int i = 0; i < g.kMaxObs; i++) {
-                    const double rx = g.obs_x[i] - g.ego_x;
-                    const double ry = g.obs_y[i] - g.ego_y;
-                    const double along = rx * fwd_x + ry * fwd_y;       /* 沿车头前方 */
-                    const double lat_signed = -rx * fwd_y + ry * fwd_x; /* 左为正 */
+                /* 会车让行 + 窄路减速纯逻辑核（Phase 5 抽核到 oncoming_yield.h）。
+                 * 方向投影 + 横向相邻上界（只认同车道头对头）修复「掉头返程幽灵刹车 /
+                 * 会车过度保守」，heading=0 前进退化为原世界坐标零回归。阈值全用默认
+                 * （= 原内联字面量），command_speed 取 min 由纯核内部完成。 */
+                planning::YieldView yv;
+                yv.x = g.ego_x; yv.y = g.ego_y; yv.heading = g.ego_heading;
+                yv.target_speed = g.target_speed;
+                yv.command_speed = command_speed;
+                yv.lane_width = g.lane_width;
+                yv.obs_x = g.obs_x; yv.obs_y = g.obs_y;
+                yv.obs_vx = g.obs_vx; yv.obs_vy = g.obs_vy;
+                yv.obs_count = g.kMaxObs;
 
-                    /* 会车检测: 同车道头对头（lat ≤ 0.65×路宽）、迎面驶来
-                     * （rel_v < -2）、前方 60m 内 */
-                    const double rel_v = g.obs_vx[i] * fwd_x + g.obs_vy[i] * fwd_y;
-                    if (std::fabs(lat_signed) <= oncoming_lat_max &&
-                        along > 0.0 && along < 60.0 && rel_v < -2.0) {
-                        oncoming = 1;
-                    }
-
-                    /* 窄路检测: 统计左右两侧最近障碍物横向距离（前瞻窗沿车头方向）*/
-                    if (along > 0.0 && along < 20.0) {  /* 20m 前瞻窗 */
-                        if (lat_signed < 0.0 && fabs(lat_signed) < min_clearance_right)
-                            min_clearance_right = fabs(lat_signed);
-                        if (lat_signed > 0.0 && lat_signed < min_clearance_left)
-                            min_clearance_left = lat_signed;
-                    }
-                }
-
-                /* 会车让行: 降速到 40% 巡航速度 (≈5m/s),让对向车先通过 */
-                if (oncoming) {
-                    double yield_speed = g.target_speed * 0.4;
-                    if (yield_speed < command_speed)
-                        command_speed = yield_speed;
-                }
-
-                /* 窄路减速: 两侧间距 < 1.5m 时限制速度 */
-                double narrow_width = min_clearance_left + min_clearance_right;
-                if (narrow_width < 1e8 && narrow_width < 1.5) {
-                    /* 间距越窄速度越低: 1.5m→100%, 0.5m→33% */
-                    double ratio = (narrow_width - 0.3) / 1.2;
-                    if (ratio < 0.1) ratio = 0.1;
-                    if (ratio > 1.0) ratio = 1.0;
-                    double narrow_speed = g.target_speed * ratio;
-                    if (narrow_speed < command_speed)
-                        command_speed = narrow_speed;
-                }
+                planning::YieldParams yp;  /* 默认值 = 原内联字面量 */
+                planning::YieldDecision yd = planning::oncoming_yield(yv, yp);
+                command_speed = yd.command_speed;
             }
 
             /* 向 Frenet 规划器注入障碍物（世界坐标），触发自动避障/变道 */

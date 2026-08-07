@@ -591,7 +591,6 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 | [Quick Start](docs/QUICK_START.md) | 30 分钟教程 |
 | [Technical Design](docs/TECHNICAL_DESIGN.md) | 架构设计 |
 | [API Quick Reference](docs/API_QUICK_REFERENCE.md) | C API 参考 |
-| [Simulation Guide](docs/SIMULATION_GUIDE.md) | 仿真测试指南 |
 | [Visualization Architecture](docs/VISUALIZATION_ARCHITECTURE.md) | flowmond + vis/ 模块树（Layer + ViewRegistry + Qt 对象树）|
 | [Vis Module Guide](docs/VIS_MODULE_GUIDE.md) | vis/ 模块接口契约 + 设计 AI 提示词模板 |
 | [Monitoring Architecture](docs/MONITORING_ARCHITECTURE.md) | flowmond + stats bridge |
@@ -601,7 +600,6 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 | [Planning Speed Upgrade](docs/PLANNING_SPEED_UPGRADE_DESIGN.md) | ST 图 + DP 速度规划设计 |
 | [FlowBoard Contract](docs/FLOWBOARD_CONTRACT.md) | 仪表盘数据契约 |
 | [FlowBoard Scene Contract](docs/FLOWBOARD_SCENE_CONTRACT.md) | scene 数据契约 |
-| [FlowSim 仿真指南](docs/SIMULATION_GUIDE.md) | flowsim 仿真模式对照 |
 | [Hardware Deployment](docs/HARDWARE_DEPLOYMENT.md) | 硬件部署 |
 | [RC Car Hardware Checklist](docs/RC_CAR_HARDWARE_CHECKLIST.md) | RC 小车硬件落地清单 |
 | [Learning Loop](docs/LEARNING_LOOP.md) | 仿真内学习闭环 |

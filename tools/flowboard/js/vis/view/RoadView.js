@@ -12,7 +12,7 @@
  *   - 匝道：单行道、窄路面、无黄色中心线、汇入区虚线标识
  *   - 汇入区：匝道汇入主路时渲染渐变虚线
  *
- * 车道线手法移植自 docs/scene.html（materials + polygonOffset 防 z-fight），
+ * 车道线手法沿用早期原型（materials + polygonOffset 防 z-fight），
  * 但几何由 road_network 数据驱动（沿采样中心线按横向偏移铺设）。
  * road_network 变化时重建，ego 位姿变化不重建。
  */

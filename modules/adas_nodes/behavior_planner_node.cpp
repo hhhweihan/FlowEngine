@@ -31,6 +31,8 @@
 #undef LOG_FATAL
 #include "logger.h"
 #include "clock_service.h"
+#include "overtake_decision.h"
+#include "stop_light_gate.h"
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -546,26 +548,24 @@ static void on_ref_path(const Message* msg, void* user_data) {
     cJSON_Delete(root);
 }
 
-/* 归位目标车道（idx-1）前方 stop_range 内是否有非绿灯？有则不归位。 */
+/* 归位目标车道（idx-1）前方 stop_range 内是否有非绿灯？有则不归位。
+ * 纯逻辑已抽到 stop_light_gate.h（Phase 0 测试网），本函数只组视图后转发：
+ * 刹车距离/横向门限公式、返程方向翻转全在纯核，由 tests/test_stop_light_gate.cpp
+ * 回归守卫覆盖。刹车 base 公式若改，planning_node.cpp 红灯 override 需同步。 */
 static bool lane_ahead_stop_light(int lane_idx, int lc, double lw) {
-    if (!g.has_traffic_lights || g.tl_count <= 0) return false;
-    double lane_c = lane_center_y(lane_idx, lc, lw, 0.0, 0.0);
-    double v = g.ego_v; if (v < 0.0) v = 0.0;
-    /* 刹车距离 base = v²/8 + 3（≈4m/s² 减速度 + 3m 余量），与 planning_node
-     * 红灯 override（brake_dist = v*v/8 + 3，floor 5m）同源，此处再加 20m
-     * 余量、下限 60m：距红灯 60m 内都算"马上要停"，归位回去毫无意义。
-     * 若改 base 公式，planning_node.cpp 的红灯 override 需同步。 */
-    double stop_range = v * v / 8.0 + 3.0 + 20.0;
-    if (stop_range < 60.0) stop_range = 60.0;
-    for (int i = 0; i < g.tl_count; i++) {
-        if (g.tl_state[i] == 0) continue;  /* 绿灯 */
-        if (fabs(g.tl_y_lane[i] - lane_c) > lw * 0.5) continue;  /* 只查目标车道 */
-        double dx = g.tl_x[i] - g.ego_x;
-        if (g.on_return) dx = -dx;  /* 返程朝 -x：灯在前方时 dx<0 */
-        if (dx <= 0.0 || dx > stop_range) continue;
-        return true;
-    }
-    return false;
+    behavior::StopLightView sv;
+    sv.ego_x = g.ego_x;
+    sv.ego_v = g.ego_v;
+    sv.on_return = (bool)g.on_return;
+    sv.tl_x = g.tl_x;
+    sv.tl_y_lane = g.tl_y_lane;
+    sv.tl_state = g.tl_state;
+    sv.tl_count = g.tl_count;
+    sv.has_traffic_lights = (bool)g.has_traffic_lights;
+    sv.lane_count = lc;
+    sv.lane_width = lw;
+    behavior::StopLightParams sp;  // 默认 = 原内联字面量（decel=8, +3+20, floor 60, 半车道宽）
+    return behavior::lane_ahead_stop_light(lane_idx, sv, sp);
 }
 
 /* ── 协程任务 ──────────────────────────────────────────── */
@@ -747,27 +747,22 @@ protected:
                 if (follow_speed > g.cfg_cruise_speed) follow_speed = g.cfg_cruise_speed;
             }
 
-            /* ── 超车判定 ──
-             * blocked 的语义是"本车道前方有车影响通行"，用 desired_gap 的倍数
-             * 表达而非裸 80m：mult× 时距间距在 12 m/s 下约 desired_gap*mult，
-             * 会随车速自动伸缩（高速时更早察觉、低速时不误触发）。 */
-            double blocked_range = fmax(g.blocked_range_min, desired_gap * g.blocked_range_mult);
-            /* 滞环：已在 FOLLOW 时用 hysteresis× 的退出距离，避免前车在阈值附近
-             * 徘徊时 BLOCKED/LOST_LEAD 每帧翻转（实测曾 150ms 一次进出，
-             * 跟车律因此从未连续作用）。进入紧、退出松。 */
+            /* ── 超车判定 ──（纯逻辑抽到 overtake_decision.h，见 docs/ARCHITECTURE_REVIEW.md）
+             * 逐帧算 blocked/min_gap/worthwhile，unpack 回同名局部变量供下游 FSM 消费。
+             * 2026-08-04：返程被静止/慢车堵住时同样允许借道超车（去掉旧 !on_return
+             * 抑制）；committed_lane 锁定由下方 on_return 分支独立处理，不受影响。 */
             bool in_follow = (statem_current(&g.sm) == BEH_ST_FOLLOW);
-            bool blocked = (best_gap < (in_follow ? blocked_range * g.follow_hysteresis : blocked_range));
-            double rel_speed = g.ego_v - lead_speed;
-            if (rel_speed < 0.0) rel_speed = 0.0;
-            double min_gap = g.min_overtake_gap_base + rel_speed * g.min_overtake_gap_speed_mult;
-            if (min_gap > g.min_overtake_gap_cap) min_gap = g.min_overtake_gap_cap;
-            /* 2026-08-04：去掉 !g.on_return —— 返程被静止/慢车堵住时必须
-             * 允许借道超车（实测 car14 停在返程车道 25s+ 堵死 ego）。
-             * 原抑制是掩盖变道评估方向盲（dx>0 硬编码 + 变道进行中 on_return
-             * 强制 COMPLETED）的补丁；方向修正后返程变道评估正确，堵车
-             * 超车与去程同权。committed_lane 锁定由下方 on_return 分支
-             * 独立处理（几何镜像锁定当前车道），不受放开影响。 */
-            bool worthwhile = blocked && (best_gap > min_gap);
+            behavior::OvertakeParams ov_p{
+                g.blocked_range_min, g.blocked_range_mult, g.follow_hysteresis,
+                g.min_overtake_gap_base, g.min_overtake_gap_speed_mult,
+                g.min_overtake_gap_cap};
+            behavior::OvertakeDecision ov_d = behavior::overtake_decision(
+                best_gap, desired_gap, in_follow, g.ego_v, lead_speed, ov_p);
+            double blocked_range = ov_d.blocked_range;
+            bool   blocked       = ov_d.blocked;
+            double rel_speed     = ov_d.rel_speed;
+            double min_gap       = ov_d.min_gap;
+            bool   worthwhile    = ov_d.worthwhile;
 
             /* ── D: 行为决策 debug 日志（每 10 帧，复盘跟车/追尾过程） ── */
             if (g.seq % 10 == 0) {

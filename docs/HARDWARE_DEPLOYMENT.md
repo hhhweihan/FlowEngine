@@ -616,4 +616,3 @@ cmake --build build/modules/adas_nodes --target slam_node
 - [modules/adas_nodes/actuator_pwm_node.c](../modules/adas_nodes/actuator_pwm_node.c) — RC PWM 执行器源码（PCA9685/GPIO）
 - [modules/adas_nodes/stereo_vision_node.c](../modules/adas_nodes/stereo_vision_node.c) — 双目深度反投影感知源码
 - [msg/adas_msgs.msg](../msg/adas_msgs.msg) — 消息类型 IDL（含 ImuData / Pose2D / StereoFrame）
-- [docs/SIMULATION_GUIDE.md](SIMULATION_GUIDE.md) — 仿真模式文档（对照参考）
